@@ -30,6 +30,8 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "canopen_402_driver/default_homing_mode.hpp"
+#include "canopen_402_driver/command_session.hpp"
+#include "canopen_402_driver/ip_target.hpp"
 #include "canopen_402_driver/mode_forward_helper.hpp"
 #include "canopen_402_driver/profiled_position_mode.hpp"
 #include "canopen_base_driver/diagnostic_collector.hpp"
@@ -56,12 +58,31 @@ typedef ModeForwardHelper<
   (1 << Command402::CW_Operation_mode_specific0)>
   InterpolatedPositionMode;
 
+class MirroredInterpolatedPositionMode : public ModeTargetHelper<int32_t>
+{
+public:
+  explicit MirroredInterpolatedPositionMode(std::shared_ptr<LelyDriverBridge> bridge)
+  : ModeTargetHelper<int32_t>(MotorBase::Interpolated_Position), bridge_(bridge) {}
+  bool read(const uint16_t &) override { return true; }
+  bool write(Mode::OpModeAccesser & cw) override
+  {
+    if (!hasTarget()) { cw = cw.get() & ~uint16_t{1}; return false; }
+    write_ip_target(getTarget(), true, [this](uint16_t index, uint8_t sub, int32_t value) {
+      bridge_->universal_set_value<int32_t>(index, sub, value);
+    });
+    cw = cw.get() | uint16_t{1};
+    return true;
+  }
+private:
+  std::shared_ptr<LelyDriverBridge> bridge_;
+};
+
 class Motor402 : public MotorBase
 {
 public:
   Motor402(
     std::shared_ptr<LelyDriverBridge> driver, ros2_canopen::State402::InternalState switching_state,
-    int homing_timeout_seconds)
+    int homing_timeout_seconds, bool ip_target_mirror = false, bool perform_homing_on_init = true)
   : MotorBase(),
     switching_state_(switching_state),
     monitor_mode_(true),
@@ -69,9 +90,14 @@ public:
     homing_timeout_seconds_(homing_timeout_seconds)
   {
     this->driver = driver;
+    ip_target_mirror_ = ip_target_mirror;
+    perform_homing_on_init_ = perform_homing_on_init;
   }
 
   virtual bool setTarget(double val);
+  bool setTarget(double val, uint64_t epoch);
+  bool commandReady();
+  uint64_t commandEpoch();
   virtual bool enterModeAndWait(uint16_t mode);
   virtual bool isModeSupported(uint16_t mode);
   virtual uint16_t getMode();
@@ -190,7 +216,10 @@ public:
     registerMode<ProfiledVelocityMode>(MotorBase::Profiled_Velocity, driver);
     registerMode<ProfiledTorqueMode>(MotorBase::Profiled_Torque, driver);
     registerMode<DefaultHomingMode>(MotorBase::Homing, driver, homing_timeout_seconds_);
-    registerMode<InterpolatedPositionMode>(MotorBase::Interpolated_Position, driver);
+    if (ip_target_mirror_)
+      registerMode<MirroredInterpolatedPositionMode>(MotorBase::Interpolated_Position, driver);
+    else
+      registerMode<InterpolatedPositionMode>(MotorBase::Interpolated_Position, driver);
     registerMode<CyclicSynchronousPositionMode>(MotorBase::Cyclic_Synchronous_Position, driver);
     registerMode<CyclicSynchronousVelocityMode>(MotorBase::Cyclic_Synchronous_Velocity, driver);
     registerMode<CyclicSynchronousTorqueMode>(MotorBase::Cyclic_Synchronous_Torque, driver);
@@ -217,11 +246,11 @@ private:
   bool switchMode(uint16_t mode);
   bool switchState(const State402::InternalState & target);
 
-  std::atomic<uint16_t> status_word_;
-  uint16_t control_word_;
+  std::atomic<uint16_t> status_word_{0};
+  uint16_t control_word_ = 0;
   std::mutex cw_mutex_;
-  std::atomic<bool> start_fault_reset_;
-  std::atomic<State402::InternalState> target_state_;
+  std::atomic<bool> start_fault_reset_{false};
+  std::atomic<State402::InternalState> target_state_{State402::Unknown};
 
   State402 state_handler_;
 
@@ -230,8 +259,13 @@ private:
   typedef std::function<void()> AllocFuncType;
   std::unordered_map<uint16_t, AllocFuncType> mode_allocators_;
 
+  CommandSession command_session_;
+  bool ip_target_mirror_ = false;
+  bool perform_homing_on_init_ = true;
+  bool halt_pending_ = false;
+  uint64_t transport_epoch_ = 0;
   ModeSharedPtr selected_mode_;
-  uint16_t mode_id_;
+  uint16_t mode_id_ = MotorBase::No_Mode;
   std::condition_variable mode_cond_;
   std::mutex mode_mutex_;
   const State402::InternalState switching_state_;
@@ -247,7 +281,7 @@ private:
   const uint16_t supported_drive_modes_index = 0x6502;
 
   // Diagnostic components
-  std::atomic<bool> enable_diagnostics_;
+  std::atomic<bool> enable_diagnostics_{false};
   std::shared_ptr<DiagnosticsCollector> diag_collector_;
 };
 

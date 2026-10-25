@@ -153,7 +153,7 @@ public:
     {
       try
       {
-        it->second->shutdown();
+        if (it->second) it->second->shutdown();
       }
       catch (const std::exception & e)
       {
@@ -162,7 +162,7 @@ public:
     }
     try
     {
-      can_master_->shutdown();
+      if (can_master_) can_master_->shutdown();
     }
     catch (const std::exception & e)
     {

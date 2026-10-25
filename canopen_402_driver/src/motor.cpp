@@ -19,14 +19,32 @@
 #include "canopen_402_driver/motor.hpp"
 using namespace ros2_canopen;
 
+bool Motor402::commandReady()
+{
+  std::scoped_lock lock(mode_mutex_);
+  const auto health = driver ? driver->motion_health.snapshot() : MotionHealth::Snapshot{false, 0, "no driver"};
+  return command_session_.ready() && health.ready && health.epoch == transport_epoch_ &&
+    state_handler_.getState() == State402::Operation_Enable;
+}
+
+uint64_t Motor402::commandEpoch()
+{
+  std::scoped_lock lock(mode_mutex_);
+  return command_session_.epoch();
+}
+
 bool Motor402::setTarget(double val)
 {
-  if (state_handler_.getState() == State402::Operation_Enable)
-  {
-    std::scoped_lock lock(mode_mutex_);
-    return selected_mode_ && selected_mode_->setTarget(val);
-  }
-  return false;
+  return setTarget(val, commandEpoch());
+}
+
+bool Motor402::setTarget(double val, uint64_t epoch)
+{
+  std::scoped_lock lock(mode_mutex_);
+  const auto health = driver ? driver->motion_health.snapshot() : MotionHealth::Snapshot{false, 0, "no driver"};
+  return health.ready && health.epoch == transport_epoch_ && std::isfinite(val) && command_session_.accepts(epoch) &&
+    state_handler_.getState() == State402::Operation_Enable && selected_mode_ &&
+    selected_mode_->mode_id_ == mode_id_ && selected_mode_->setTarget(val);
 }
 bool Motor402::isModeSupported(uint16_t mode)
 {
@@ -35,8 +53,34 @@ bool Motor402::isModeSupported(uint16_t mode)
 
 bool Motor402::enterModeAndWait(uint16_t mode)
 {
-  bool okay = mode != MotorBase::Homing && switchMode(mode);
-  return okay;
+  uint64_t epoch;
+  bool wait_for_halt;
+  {
+    std::scoped_lock lock(mode_mutex_);
+    command_session_.revoke();
+    epoch = command_session_.epoch();
+    wait_for_halt = halt_pending_;
+  }
+  // A restart must not cancel a Quick Stop request before its feedback arrives.
+  if (wait_for_halt && !switchState(State402::Quick_Stop_Active)) return false;
+  {
+    std::scoped_lock lock(mode_mutex_);
+    if (command_session_.epoch() != epoch) return false;
+    halt_pending_ = false;
+  }
+  const auto health_before = driver ? driver->motion_health.snapshot() : MotionHealth::Snapshot{true, 0, "test"};
+  if (!health_before.ready) return false;
+  const bool okay = mode != MotorBase::Homing && mode != MotorBase::No_Mode && switchMode(mode);
+  std::scoped_lock lock(mode_mutex_);
+  const auto health_after = driver ? driver->motion_health.snapshot() : MotionHealth::Snapshot{false, 0, "no driver"};
+  if (okay && health_after.ready && health_after.epoch == health_before.epoch && command_session_.epoch() == epoch &&
+      state_handler_.getState() == State402::Operation_Enable && mode_id_ == mode)
+  {
+    transport_epoch_ = health_after.epoch;
+    command_session_.confirm();
+    return true;
+  }
+  return false;
 }
 
 uint16_t Motor402::getMode()
@@ -47,12 +91,10 @@ uint16_t Motor402::getMode()
 
 bool Motor402::isModeSupportedByDevice(uint16_t mode)
 {
-  uint32_t supported_modes =
+  if (mode == 0 || mode > 32) return false;
+  const uint32_t supported_modes =
     driver->universal_get_value<uint32_t>(supported_drive_modes_index, 0x0);
-  bool supported = supported_modes & (1 << (mode - 1));
-  bool below_max = mode <= 32;
-  bool above_min = mode > 0;
-  return below_max && above_min && supported;
+  return (supported_modes & (uint32_t{1} << (mode - 1))) != 0;
 }
 void Motor402::registerMode(uint16_t id, const ModeSharedPtr & m)
 {
@@ -102,23 +144,14 @@ bool Motor402::switchMode(uint16_t mode)
     return false;
   }
 
-  if (!next_mode->start())
+  bool same_mode = false;
   {
-    RCLCPP_INFO(rclcpp::get_logger("canopen_402_driver"), "Could not  start mode.");
-    return false;
-  }
-
-  {  // disable mode handler
     std::scoped_lock lock(mode_mutex_);
-
-    if (mode_id_ == mode && selected_mode_ && selected_mode_->mode_id_ == mode)
-    {
-      // nothing to do
-      return true;
-    }
-
-    selected_mode_.reset();
+    if (!next_mode->start()) return false;
+    same_mode = mode_id_ == mode && selected_mode_ && selected_mode_->mode_id_ == mode;
+    if (!same_mode) selected_mode_.reset();
   }
+  if (same_mode) return switchState(State402::Operation_Enable);
 
   if (!switchState(switching_state_)) return false;
 
@@ -217,15 +250,23 @@ bool Motor402::readState()
   state_handler_.read(sw);
 
   std::unique_lock lock(mode_mutex_);
+  if (state_handler_.getState() == State402::Quick_Stop_Active) halt_pending_ = false;
   uint16_t new_mode;
   new_mode = driver->universal_get_value<int8_t>(op_mode_display_index, 0x0);
   // RCLCPP_INFO(rclcpp::get_logger("canopen_402_driver"), "Mode %hhi",new_mode);
+  if (command_session_.ready() &&
+      (state_handler_.getState() != State402::Operation_Enable || !selected_mode_ ||
+       selected_mode_->mode_id_ != new_mode))
+  {
+    command_session_.revoke();
+  }
 
   if (selected_mode_ && selected_mode_->mode_id_ == new_mode)
   {
     if (!selected_mode_->read(sw))
     {
-      RCLCPP_INFO(rclcpp::get_logger("canopen_402_driver"), "Mode handler has error.");
+      command_session_.revoke();
+      RCLCPP_ERROR(rclcpp::get_logger("canopen_402_driver"), "Mode handler has error.");
     }
   }
   if (new_mode != mode_id_)
@@ -256,12 +297,15 @@ void Motor402::handleWrite()
 {
   std::scoped_lock lock(cw_mutex_);
   control_word_ |= (1 << Command402::CW_Halt);
+  const auto health = driver->motion_health.snapshot();
   if (state_handler_.getState() == State402::Operation_Enable)
   {
     std::scoped_lock lock(mode_mutex_);
     Mode::OpModeAccesser cwa(control_word_);
     bool okay = false;
-    if (selected_mode_ && selected_mode_->mode_id_ == mode_id_)
+    if (selected_mode_ && selected_mode_->mode_id_ == mode_id_ &&
+        ((command_session_.ready() && health.ready && health.epoch == transport_epoch_) ||
+         mode_id_ == MotorBase::Homing))
     {
       okay = selected_mode_->write(cwa);
     }
@@ -350,6 +394,10 @@ void Motor402::handleDiag()
 
 bool Motor402::handleInit()
 {
+  {
+    std::scoped_lock lock(mode_mutex_);
+    command_session_.revoke();
+  }
   for (std::unordered_map<uint16_t, AllocFuncType>::iterator it = mode_allocators_.begin();
        it != mode_allocators_.end(); ++it)
   {
@@ -373,6 +421,7 @@ bool Motor402::handleInit()
     return false;
   }
 
+  if (!perform_homing_on_init_) return true;
   ModeSharedPtr m = allocMode(MotorBase::Homing);
   if (!m)
   {
@@ -409,11 +458,20 @@ bool Motor402::handleInit()
 }
 bool Motor402::handleShutdown()
 {
+  {
+    std::scoped_lock lock(mode_mutex_);
+    command_session_.revoke();
+  }
   switchMode(MotorBase::No_Mode);
   return switchState(State402::Switch_On_Disabled);
 }
 bool Motor402::handleHalt()
 {
+  {
+    std::scoped_lock lock(mode_mutex_);
+    command_session_.revoke();
+    halt_pending_ = halt_pending_ || state_handler_.getState() == State402::Operation_Enable;
+  }
   State402::InternalState state = state_handler_.getState();
   std::scoped_lock lock(cw_mutex_);
 
@@ -437,6 +495,10 @@ bool Motor402::handleHalt()
 }
 bool Motor402::handleRecover()
 {
+  {
+    std::scoped_lock lock(mode_mutex_);
+    command_session_.revoke();
+  }
   start_fault_reset_ = true;
   {
     std::scoped_lock lock(mode_mutex_);
@@ -455,6 +517,10 @@ bool Motor402::handleRecover()
 }
 bool Motor402::handleEnable()
 {
+  {
+    std::scoped_lock lock(mode_mutex_);
+    command_session_.revoke();
+  }
   RCLCPP_INFO(rclcpp::get_logger("canopen_402_driver"), "Enable: Read State");
   if (!readState())
   {
@@ -472,6 +538,10 @@ bool Motor402::handleEnable()
 
 bool Motor402::handleDisable()
 {
+  {
+    std::scoped_lock lock(mode_mutex_);
+    command_session_.revoke();
+  }
   RCLCPP_INFO(rclcpp::get_logger("canopen_402_driver"), "Disable: Read State");
   if (!readState())
   {

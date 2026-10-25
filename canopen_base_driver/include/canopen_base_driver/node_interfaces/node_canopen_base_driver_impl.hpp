@@ -239,8 +239,10 @@ void NodeCanopenBaseDriver<NODETYPE>::activate(bool called_from_base)
 template <class NODETYPE>
 void NodeCanopenBaseDriver<NODETYPE>::deactivate(bool called_from_base)
 {
-  nmt_state_publisher_thread_.join();
-  poll_timer_->cancel();
+  std::scoped_lock<std::recursive_mutex> lock(poll_mutex_);
+  if (poll_timer_) poll_timer_->cancel();
+  else if (this->lely_driver_) this->lely_driver_->unset_sync_function();
+  if (nmt_state_publisher_thread_.joinable()) nmt_state_publisher_thread_.join();
   emcy_queue_.reset();
   rpdo_queue_.reset();
   if (diagnostic_enabled_.load())
@@ -449,6 +451,8 @@ void NodeCanopenBaseDriver<NODETYPE>::rdpo_listener()
 template <class NODETYPE>
 void NodeCanopenBaseDriver<NODETYPE>::poll_timer_callback()
 {
+  std::scoped_lock<std::recursive_mutex> lock(poll_mutex_);
+  if (!this->activated_.load()) return;
   for (int i = 0; i < 10; i++)
   {
     auto opt = emcy_queue_->try_pop();

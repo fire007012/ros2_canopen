@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.8)
 project(canopen_ros2_control)
+find_package(robot_safety REQUIRED)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     # add_compile_options(-Wall -Wextra -Wpedantic)
@@ -7,6 +8,8 @@ endif()
 
 # find dependencies
 set(THIS_PACKAGE_INCLUDE_DEPENDS
+  std_srvs
+  robot_safety
   canopen_402_driver
   canopen_core
   canopen_proxy_driver
@@ -60,6 +63,9 @@ install(
 )
 
 if(BUILD_TESTING)
+  ament_add_gmock(test_cia402_data test/test_cia402_data.cpp)
+  target_include_directories(test_cia402_data PRIVATE include)
+  ament_target_dependencies(test_cia402_data ${THIS_PACKAGE_INCLUDE_DEPENDS})
   #find_package(ament_cmake_gmock REQUIRED)
   #find_package(ros2_control_test_assets REQUIRED)
 

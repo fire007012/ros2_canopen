@@ -15,6 +15,7 @@
 #ifndef CANOPEN_BASE_DRIVER__LELY_BRIDGE_HPP_
 #define CANOPEN_BASE_DRIVER__LELY_BRIDGE_HPP_
 
+#include "canopen_base_driver/motion_health.hpp"
 #include <sys/stat.h>
 
 #include <lely/co/dcf.hpp>
@@ -290,26 +291,27 @@ protected:
 
   // NMT synchronisation items
   std::promise<canopen::NmtState> nmt_state_promise;
-  std::atomic<bool> nmt_state_is_set;
+  std::atomic<bool> nmt_state_is_set{false};
   std::mutex nmt_mtex;
 
   // RPDO synchronisation items
   std::promise<COData> rpdo_promise;
-  std::atomic<bool> rpdo_is_set;
+  std::atomic<bool> rpdo_is_set{false};
   std::mutex pdo_mtex;
   std::shared_ptr<SafeQueue<COData>> rpdo_queue;
 
   // EMCY synchronisation items
   std::promise<COEmcy> emcy_promise;
-  std::atomic<bool> emcy_is_set;
+  std::atomic<bool> emcy_is_set{false};
   std::mutex emcy_mtex;
   std::shared_ptr<SafeQueue<COEmcy>> emcy_queue;
 
   // BOOT synchronisation items
-  std::atomic<bool> booted;
-  char boot_status;
+  std::atomic<bool> booted{false};
+  char boot_status = 0;
+  bool boot_complete_ = false;
   std::string boot_what;
-  canopen::NmtState boot_state;
+  canopen::NmtState boot_state = canopen::NmtState::BOOTUP;
   std::condition_variable boot_cond;
   std::mutex boot_mtex;
   std::chrono::milliseconds boot_timeout_;
@@ -388,11 +390,14 @@ protected:
    * @param msef the manufacturer-specific error code.
    */
   void OnEmcy(uint16_t eec, uint8_t er, uint8_t msef[5]) noexcept override;
+  void OnHeartbeat(bool occurred) noexcept override;
+  void OnCanState(io::CanState state, io::CanState previous) noexcept override;
 
   // void OnConfig(::std::function<void(::std::error_code ec)> res) noexcept override;
 
 public:
   using FiberDriver::FiberDriver;
+  MotionHealth motion_health;
 
   /**
    * @brief Construct a new Lely Bridge object
@@ -448,10 +453,8 @@ public:
   std::future<bool> async_sdo_write_typed(uint16_t idx, uint8_t subidx, T value)
   {
     std::unique_lock<std::mutex> lck(sdo_mutex);
-    if (running)
-    {
-      sdo_cond.wait(lck);
-    }
+    if (!sdo_cond.wait_for(lck, std::chrono::seconds(2), [this]() { return !running; }))
+      throw std::runtime_error("previous SDO still pending");
     running = true;
 
     auto prom = std::make_shared<std::promise<bool>>();
@@ -529,15 +532,32 @@ public:
    * request was unsuccessful.
    */
   std::future<COData> async_sdo_read(COData data);
+  std::future<std::string> async_sdo_read_text(uint16_t index, uint8_t subindex)
+  {
+    std::unique_lock<std::mutex> lock(sdo_mutex);
+    if (!sdo_cond.wait_for(lock, std::chrono::seconds(2), [this]() { return !running; }))
+      throw std::runtime_error("previous SDO still pending");
+    running = true;
+    auto promise = std::make_shared<std::promise<std::string>>();
+    auto future = promise->get_future();
+    try {
+      SubmitRead<std::string>(index, subindex,
+        [this, promise](uint8_t id, uint16_t i, uint8_t s, std::error_code ec, std::string value) {
+          if (ec) promise->set_exception(canopen::make_sdo_exception_ptr(id, i, s, ec, "text upload"));
+          else promise->set_value(value);
+          std::lock_guard<std::mutex> guard(sdo_mutex); running = false; sdo_cond.notify_one();
+        }, sdo_timeout);
+    } catch (...) { running = false; sdo_cond.notify_one(); throw; }
+    return future;
+  }
+
 
   template <typename T>
   std::future<T> async_sdo_read_typed(uint16_t idx, uint8_t subidx)
   {
     std::unique_lock<std::mutex> lck(sdo_mutex);
-    if (running)
-    {
-      sdo_cond.wait(lck);
-    }
+    if (!sdo_cond.wait_for(lck, std::chrono::seconds(2), [this]() { return !running; }))
+      throw std::runtime_error("previous SDO still pending");
     running = true;
 
     auto prom = std::make_shared<std::promise<T>>();
@@ -681,9 +701,9 @@ public:
     if (booted.load()) return true;
 
     std::unique_lock<std::mutex> lck(boot_mtex);
-    auto status = boot_cond.wait_for(lck, boot_timeout_);
+    const bool complete = boot_cond.wait_for(lck, boot_timeout_, [this]() { return boot_complete_; });
 
-    if (status == std::cv_status::timeout)
+    if (!complete)
     {
       throw std::system_error(
         static_cast<int>(LelyBridgeErrc::TimeOut), LelyBridgeErrCategory(), "Boot Timeout");
@@ -711,7 +731,8 @@ public:
    */
   void Boot()
   {
-    booted.store(false);
+    { std::lock_guard<std::mutex> lock(boot_mtex); booted.store(false); boot_complete_ = false; }
+    motion_health.nmt(false);
     FiberDriver::Boot();
   }
 
@@ -798,6 +819,7 @@ public:
       {
         return value;
       }
+      throw std::runtime_error("SDO read failed; refusing cached object value");
     }
 
     std::scoped_lock<std::mutex> lck(this->dictionary_mutex_);
@@ -851,7 +873,8 @@ public:
     }
     else
     {
-      sync_sdo_write_typed(index, subindex, value, this->sdo_timeout);
+      if (!sync_sdo_write_typed(index, subindex, value, this->sdo_timeout))
+        throw std::runtime_error("SDO write failed");
     }
   }
 };

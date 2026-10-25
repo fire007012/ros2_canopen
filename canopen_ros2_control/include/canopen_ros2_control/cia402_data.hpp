@@ -18,6 +18,8 @@
 #define CANOPEN_ROS2_CONTROL__CIA402_DATA_HPP_
 #include <yaml-cpp/yaml.h>
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 #include "canopen_402_driver/base.hpp"
@@ -41,6 +43,10 @@ struct Cia402Data
   std::vector<std::string> interfaces_to_running;
   std::vector<std::string> interfaces_to_stop;
   YAML::Node config;
+  uint64_t command_epoch = 0;
+  bool command_received = false;
+  double lower = -std::numeric_limits<double>::infinity(), upper = std::numeric_limits<double>::infinity();
+  double velocity_limit = std::numeric_limits<double>::infinity();
 
   // FROM MOTOR
   double actual_position = std::numeric_limits<double>::quiet_NaN();
@@ -54,7 +60,19 @@ struct Cia402Data
   bool init_data(hardware_interface::ComponentInfo & joint, std::string device_dump)
   {
     joint_name = joint.name;
+    for (const auto & interface : joint.command_interfaces) {
+      if (interface.name == "position") {
+        if (!interface.min.empty()) lower = std::stod(interface.min);
+        if (!interface.max.empty()) upper = std::stod(interface.max);
+      }
+      if (interface.name == "velocity" && !interface.max.empty()) velocity_limit = std::stod(interface.max);
+    }
+    if (lower >= upper || velocity_limit <= 0) return false;
     auto config = YAML::Load(device_dump);
+    const auto declares = [&joint](const std::string & name) {
+      return std::any_of(joint.command_interfaces.begin(), joint.command_interfaces.end(),
+        [&name](const auto & interface) { return interface.name == name; });
+    };
 
     if (!config["node_id"])
     {
@@ -66,7 +84,7 @@ struct Cia402Data
     RCLCPP_INFO(
       rclcpp::get_logger(joint_name), "Node id for '%s' is '%u'", joint.name.c_str(), node_id);
 
-    if (config["position_mode"])
+    if (config["position_mode"] && declares("position"))
     {
       auto position_mode =
         (ros2_canopen::MotorBase::OperationMode)config["position_mode"].as<uint>();
@@ -76,7 +94,7 @@ struct Cia402Data
       command_interface_to_operation_mode.emplace(
         std::pair(joint.name + "/" + "position", position_mode));
     }
-    if (config["velocity_mode"])
+    if (config["velocity_mode"] && declares("velocity"))
     {
       auto velocity_mode =
         (ros2_canopen::MotorBase::OperationMode)config["velocity_mode"].as<uint>();
@@ -86,7 +104,7 @@ struct Cia402Data
       command_interface_to_operation_mode.emplace(
         std::pair(joint.name + "/" + "velocity", velocity_mode));
     }
-    if (config["effort_mode"])
+    if (config["effort_mode"] && declares("effort"))
     {
       auto effort_mode = (ros2_canopen::MotorBase::OperationMode)config["effort_mode"].as<uint>();
       RCLCPP_INFO(
@@ -146,9 +164,29 @@ struct Cia402Data
     actual_velocity = driver->get_speed();
   }
 
-  void write_target()
+  bool write_target()
   {
-    const uint16_t & mode = driver->get_mode();
+    return driver && write_target(*driver);
+  }
+
+  template <class Driver>
+  bool write_target(Driver & motor)
+  {
+    if (interfaces_to_running.empty()) return true;
+    if (interfaces_to_running.size() != 1) return false;
+    const auto active = command_interface_to_operation_mode.find(interfaces_to_running.front());
+    if (active == command_interface_to_operation_mode.end() || !motor.command_ready() ||
+        motor.command_epoch() != command_epoch || motor.get_mode() != active->second)
+    {
+      interfaces_to_running.clear();
+      clear_commands();
+      return false;
+    }
+    const uint16_t mode = motor.get_mode();
+    const double command = (mode == MotorBase::Profiled_Velocity || mode == MotorBase::Cyclic_Synchronous_Velocity) ? target_velocity :
+      (mode == MotorBase::Profiled_Torque || mode == MotorBase::Cyclic_Synchronous_Torque) ? target_torque : target_position;
+    if (!std::isfinite(command)) return std::isnan(command) && !command_received;
+    command_received = true;
     switch (mode)
     {
       case MotorBase::No_Mode:
@@ -156,44 +194,70 @@ struct Cia402Data
       case MotorBase::Profiled_Position:
       case MotorBase::Cyclic_Synchronous_Position:
       case MotorBase::Interpolated_Position:
-        driver->set_target(target_position);
+        if (std::isfinite(target_position)) {
+          if (target_position < lower || target_position > upper) return false;
+          return motor.set_target(target_position, command_epoch);
+        }
         break;
       case MotorBase::Profiled_Velocity:
       case MotorBase::Cyclic_Synchronous_Velocity:
-        driver->set_target(target_velocity);
+        if (std::isfinite(target_velocity)) {
+          if (std::abs(target_velocity) > velocity_limit ||
+              (actual_position <= lower && target_velocity < 0) ||
+              (actual_position >= upper && target_velocity > 0)) return false;
+          return motor.set_target(target_velocity, command_epoch);
+        }
         break;
       case MotorBase::Profiled_Torque:
       case MotorBase::Cyclic_Synchronous_Torque:
-        driver->set_target(target_torque);
+        if (std::isfinite(target_torque)) return motor.set_target(target_torque, command_epoch);
         break;
       default:
-        RCLCPP_INFO(rclcpp::get_logger("robot_system_interface"), "Mode not supported");
+        return false;
     }
+    return true;
+  }
+
+  void clear_commands()
+  {
+    command_received = false;
+    target_position = target_velocity = target_torque = std::numeric_limits<double>::quiet_NaN();
   }
 
   bool perform_switch()
   {
-    if (interfaces_to_start.size() > 1)
-    {
-      RCLCPP_ERROR(
-        rclcpp::get_logger(joint_name),
-        "Trying to start multiple command interfaces at once for joint '%s'", joint_name.c_str());
-      return false;
-    }
-    if (interfaces_to_start.size() == 0)
-    {
-      return true;
-    }
-    auto mode = command_interface_to_operation_mode[interfaces_to_start[0]];
-    interfaces_to_running.clear();
-    interfaces_to_running.push_back(interfaces_to_start[0]);
-    interfaces_to_stop.clear();
+    return driver && perform_switch(*driver);
+  }
+
+  template <class Driver>
+  bool perform_switch(Driver & motor)
+  {
+    const auto start = interfaces_to_start;
+    const auto stop = interfaces_to_stop;
     interfaces_to_start.clear();
-    RCLCPP_INFO(
-      rclcpp::get_logger(joint_name),
-      "Switching to '%s' command mode with CIA402 operation mode '%u'",
-      interfaces_to_running[0].c_str(), mode);
-    return driver->set_operation_mode(mode);
+    interfaces_to_stop.clear();
+    if (start.size() > 1) return false;
+    for (const auto & name : start)
+      if (command_interface_to_operation_mode.count(name) == 0) return false;
+    for (const auto & name : stop)
+      if (command_interface_to_operation_mode.count(name) == 0) return false;
+
+    const bool stopping = !interfaces_to_running.empty() &&
+      std::find(stop.begin(), stop.end(), interfaces_to_running.front()) != stop.end();
+    if (!start.empty() && !interfaces_to_running.empty() && !stopping) return false;
+    if (start.empty() && !stopping) return true;
+
+    // Revoke the old command session before any device operation, including failures.
+    interfaces_to_running.clear();
+    clear_commands();
+    if (stopping && !motor.halt_motor()) return false;
+    if (start.empty()) return true;
+    const auto mode = command_interface_to_operation_mode.at(start.front());
+    if (!motor.set_operation_mode(mode) || !motor.command_ready() || motor.get_mode() != mode)
+      return false;
+    command_epoch = motor.command_epoch();
+    interfaces_to_running = start;
+    return true;
   }
 
   bool check_id(uint8_t id)

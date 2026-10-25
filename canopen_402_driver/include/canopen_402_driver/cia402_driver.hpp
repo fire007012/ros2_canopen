@@ -73,7 +73,12 @@ public:
 
   double get_position() { return node_canopen_402_driver_->get_position(); }
 
+  bool communication_ready() { return node_canopen_402_driver_->communication_ready(); }
+  bool command_ready() { return node_canopen_402_driver_->command_ready(); }
+  uint64_t command_epoch() { return node_canopen_402_driver_->command_epoch(); }
   bool set_target(double target) { return node_canopen_402_driver_->set_target(target); }
+  bool set_target(double target, uint64_t epoch)
+  { return node_canopen_402_driver_->set_target(target, epoch); }
 
   bool init_motor() { return node_canopen_402_driver_->init_motor(); }
 

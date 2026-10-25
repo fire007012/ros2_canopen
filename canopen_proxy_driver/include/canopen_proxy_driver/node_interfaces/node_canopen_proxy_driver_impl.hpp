@@ -255,6 +255,19 @@ void NodeCanopenProxyDriver<NODETYPE>::on_sdo_read(
   const canopen_interfaces::srv::CORead::Request::SharedPtr request,
   canopen_interfaces::srv::CORead::Response::SharedPtr response)
 {
+  if (!this->activated_.load()) { response->success = false; return; }
+  if (request->index >= 0x1008 && request->index <= 0x100A) {
+    try {
+      std::scoped_lock<std::mutex> lock(sdo_mtex);
+      auto future = this->lely_driver_->async_sdo_read_text(request->index, request->subindex);
+      if (future.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
+        throw std::runtime_error("SDO text timeout");
+      response->text = future.get(); response->success = true;
+    } catch (const std::exception & e) {
+      response->success = false; RCLCPP_ERROR(this->node_->get_logger(), "%s", e.what());
+    }
+    return;
+  }
   ros2_canopen::COData data = {request->index, request->subindex, 0U};
   response->success = sdo_read(data);
   response->data = data.data_;
@@ -272,17 +285,18 @@ bool NodeCanopenProxyDriver<NODETYPE>::sdo_read(ros2_canopen::COData & data)
     // Only allow one SDO request concurrently
     std::scoped_lock<std::mutex> lk(sdo_mtex);
     // Send read request
-    auto f = this->lely_driver_->async_sdo_read(data);
-    // Wait for response
-    f.wait();
-    // Process response
     try
     {
+    auto f = this->lely_driver_->async_sdo_read(data);
+      if (f.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
+        throw std::runtime_error("SDO response timeout");
+    // Wait for response
+    // Process response
       data.data_ = f.get().data_;
     }
     catch (std::exception & e)
     {
-      RCLCPP_ERROR(this->node_->get_logger(), e.what());
+      RCLCPP_ERROR(this->node_->get_logger(), "%s", e.what());
       return false;
     }
     return true;
@@ -313,18 +327,16 @@ bool NodeCanopenProxyDriver<NODETYPE>::sdo_write(ros2_canopen::COData & data)
     std::scoped_lock<std::mutex> lk(sdo_mtex);
 
     // Send write request
-    auto f = this->lely_driver_->async_sdo_write(data);
-    // Wait for request to complete
-    f.wait();
-
-    // Process response
     try
     {
+    auto f = this->lely_driver_->async_sdo_write(data);
+      if (f.wait_for(std::chrono::seconds(2)) != std::future_status::ready)
+        throw std::runtime_error("SDO response timeout");
       return f.get();
     }
     catch (std::exception & e)
     {
-      RCLCPP_ERROR(this->node_->get_logger(), e.what());
+      RCLCPP_ERROR(this->node_->get_logger(), "%s", e.what());
       return false;
     }
     return true;

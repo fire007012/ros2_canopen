@@ -28,6 +28,9 @@
 #include "rclcpp/executors.hpp"
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
+#include "robot_safety/domain.hpp"
+#include "std_srvs/srv/trigger.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 namespace canopen_ros2_control
 {
 class RobotSystem : public hardware_interface::SystemInterface
@@ -36,7 +39,7 @@ public:
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
   RobotSystem() : hardware_interface::SystemInterface() {}
   CANOPEN_ROS2_CONTROL__VISIBILITY_PUBLIC
-  ~RobotSystem() = default;
+  ~RobotSystem() { clean(); }
 
   /**
    * @brief Initialize the hardware interface
@@ -160,7 +163,16 @@ public:
     const std::vector<std::string> & start_interfaces,
     const std::vector<std::string> & stop_interfaces) override;
 
+  hardware_interface::CallbackReturn on_error(const rclcpp_lifecycle::State &) override
+  { clean(); return hardware_interface::CallbackReturn::SUCCESS; }
 protected:
+  std::shared_ptr<robot_safety::Domain> safety_;
+  uint64_t safety_epoch_ = 0;
+  bool configured_ok_ = false, hardware_active_ = false;
+  std::string configure_error_;
+  std::shared_ptr<rclcpp::Node> runtime_node_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_service_, status_service_;
+  rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr running_service_;
   std::shared_ptr<ros2_canopen::DeviceContainer> device_container_;
   std::shared_ptr<rclcpp::executors::MultiThreadedExecutor> executor_;
   std::vector<Cia402Data> robot_motor_data_;

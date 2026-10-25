@@ -39,6 +39,7 @@ class NodeCanopen402Driver : public NodeCanopenProxyDriver<NODETYPE>
     "NODETYPE must derive from rclcpp::Node or rclcpp_lifecycle::LifecycleNode");
 
 protected:
+  bool managed_by_ros2_control_ = false;
   std::shared_ptr<Motor402> motor_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr handle_init_service;
@@ -84,7 +85,20 @@ public:
     return motor_->get_position() * scale_pos_from_dev_ + offset_pos_from_dev_;
   }
 
+  bool communication_ready() { return this->activated_.load() && this->lely_driver_->motion_health.snapshot().ready; }
+  bool command_ready() { return this->activated_.load() && motor_ && motor_->commandReady(); }
+  uint64_t command_epoch() { return motor_->commandEpoch(); }
   virtual uint16_t get_mode() { return motor_->getMode(); }
+  bool tpdo_transmit(COData & data) override
+  { return !managed_by_ros2_control_ && NodeCanopenProxyDriver<NODETYPE>::tpdo_transmit(data); }
+  bool sdo_write(COData & data) override
+  {
+    if (managed_by_ros2_control_ &&
+        (!motor_ || motor_->commandReady() || !(data.index_ == 0x607C || data.index_ == 0x2003 ||
+          data.index_ == 0x607D || data.index_ == 0x1010))) return false;
+    return NodeCanopenProxyDriver<NODETYPE>::sdo_write(data);
+  }
+
 
   /**
    * @brief Service Callback to initialise device
@@ -325,7 +339,7 @@ public:
    *
    * @return bool
    */
-  bool set_target(double target);
+  bool set_target(double target, uint64_t epoch = std::numeric_limits<uint64_t>::max());
 };
 }  // namespace node_interfaces
 }  // namespace ros2_canopen

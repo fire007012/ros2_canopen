@@ -80,6 +80,7 @@ std::string LelyBridgeErrCategory::message(int ev) const
 
 void LelyDriverBridge::OnState(canopen::NmtState state) noexcept
 {
+  motion_health.nmt(state == canopen::NmtState::START);
   canopen::NmtState st = state;
   // We assume 1F80 bit 2 is false. All slaves are put into Operational after boot-up.
   // Lelycore does not track NMT states in this mode except BOOTUP.
@@ -103,11 +104,11 @@ void LelyDriverBridge::OnState(canopen::NmtState state) noexcept
 void LelyDriverBridge::OnBoot(canopen::NmtState st, char es, const ::std::string & what) noexcept
 {
   FiberDriver::OnBoot(st, es, what);
-  if (es == 0)
-  {
-    booted.store(true);
-  }
   std::unique_lock<std::mutex> lck(boot_mtex);
+  const bool accepted = es == 0 || es == 'L';
+  booted.store(accepted);
+  motion_health.nmt(accepted);
+  boot_complete_ = true;
   this->boot_state = st;
   this->boot_status = es;
   this->boot_what = what;
@@ -174,6 +175,7 @@ void LelyDriverBridge::OnRpdoWrite(uint16_t idx, uint8_t subidx) noexcept
     sub->setVal<CO_DEFTYPE_INTEGER32>((int32_t)rpdo_mapped[idx][subidx]);
     std::memcpy(&data, &sub->getVal<CO_DEFTYPE_INTEGER32>(), 4);
   }
+  motion_health.feedback(idx);
   COData codata = {idx, subidx, data};
 
   //  We do not care so much about missing a message, rather push them through.
@@ -182,6 +184,7 @@ void LelyDriverBridge::OnRpdoWrite(uint16_t idx, uint8_t subidx) noexcept
 
 void LelyDriverBridge::OnEmcy(uint16_t eec, uint8_t er, uint8_t msef[5]) noexcept
 {
+  motion_health.emergency(eec);
   FiberDriver::OnEmcy(eec, er, msef);
 
   COEmcy emcy;
@@ -195,10 +198,8 @@ void LelyDriverBridge::OnEmcy(uint16_t eec, uint8_t er, uint8_t msef[5]) noexcep
 std::future<bool> LelyDriverBridge::async_sdo_write(COData data)
 {
   std::unique_lock<std::mutex> lck(sdo_mutex);
-  if (running)
-  {
-    sdo_cond.wait(lck);
-  }
+  if (!sdo_cond.wait_for(lck, std::chrono::seconds(2), [this]() { return !running; }))
+    throw std::runtime_error("previous SDO still pending");
   running = true;
 
   sdo_write_data_promise = std::make_shared<std::promise<bool>>();
@@ -210,9 +211,16 @@ std::future<bool> LelyDriverBridge::async_sdo_write(COData data)
               << " object does not exist" << std::endl;
     this->sdo_write_data_promise->set_value(false);
     this->running = false;
+    this->sdo_cond.notify_one();
     return sdo_write_data_promise->get_future();
   }
   uint8_t co_def = (uint8_t)sub->getType();
+  if (co_def != CO_DEFTYPE_UNSIGNED8 && co_def != CO_DEFTYPE_INTEGER8 &&
+      co_def != CO_DEFTYPE_UNSIGNED16 && co_def != CO_DEFTYPE_INTEGER16 &&
+      co_def != CO_DEFTYPE_UNSIGNED32 && co_def != CO_DEFTYPE_INTEGER32) {
+    running = false; sdo_cond.notify_one();
+    throw std::runtime_error("unsupported numeric SDO type");
+  }
   try
   {
     if (co_def == CO_DEFTYPE_UNSIGNED8)
@@ -242,7 +250,7 @@ std::future<bool> LelyDriverBridge::async_sdo_write(COData data)
   }
   catch (lely::canopen::SdoError & e)
   {
-    this->sdo_read_data_promise->set_exception(lely::canopen::make_sdo_exception_ptr(
+    this->sdo_write_data_promise->set_exception(lely::canopen::make_sdo_exception_ptr(
       this->get_id(), data.index_, data.subindex_, e.code(), "AsyncUpload"));
     this->running = false;
     this->sdo_cond.notify_one();
@@ -254,10 +262,8 @@ std::future<bool> LelyDriverBridge::async_sdo_write(COData data)
 std::future<COData> LelyDriverBridge::async_sdo_read(COData data)
 {
   std::unique_lock<std::mutex> lck(sdo_mutex);
-  if (running)
-  {
-    sdo_cond.wait(lck);
-  }
+  if (!sdo_cond.wait_for(lck, std::chrono::seconds(2), [this]() { return !running; }))
+    throw std::runtime_error("previous SDO still pending");
   running = true;
 
   sdo_read_data_promise = std::make_shared<std::promise<COData>>();
@@ -277,9 +283,16 @@ std::future<COData> LelyDriverBridge::async_sdo_read(COData data)
       this->sdo_read_data_promise->set_exception(std::current_exception());
     }
     this->running = false;
+    this->sdo_cond.notify_one();
     return sdo_read_data_promise->get_future();
   }
   uint8_t co_def = (uint8_t)sub->getType();
+  if (co_def != CO_DEFTYPE_UNSIGNED8 && co_def != CO_DEFTYPE_INTEGER8 &&
+      co_def != CO_DEFTYPE_UNSIGNED16 && co_def != CO_DEFTYPE_INTEGER16 &&
+      co_def != CO_DEFTYPE_UNSIGNED32 && co_def != CO_DEFTYPE_INTEGER32) {
+    running = false; sdo_cond.notify_one();
+    throw std::runtime_error("unsupported numeric SDO type");
+  }
   try
   {
     if (co_def == CO_DEFTYPE_UNSIGNED8)
@@ -340,6 +353,12 @@ void LelyDriverBridge::tpdo_transmit(COData data)
     return;
   }
   uint8_t co_def = (uint8_t)sub->getType();
+  if (co_def != CO_DEFTYPE_UNSIGNED8 && co_def != CO_DEFTYPE_INTEGER8 &&
+      co_def != CO_DEFTYPE_UNSIGNED16 && co_def != CO_DEFTYPE_INTEGER16 &&
+      co_def != CO_DEFTYPE_UNSIGNED32 && co_def != CO_DEFTYPE_INTEGER32) {
+    running = false; sdo_cond.notify_one();
+    throw std::runtime_error("unsupported numeric SDO type");
+  }
   try
   {
     if (co_def == CO_DEFTYPE_UNSIGNED8)
@@ -411,3 +430,15 @@ void LelyDriverBridge::nmt_command(canopen::NmtCommand command)
 
 uint8_t LelyDriverBridge::get_id() { return nodeid; }
 }  // namespace ros2_canopen
+
+void ros2_canopen::LelyDriverBridge::OnHeartbeat(bool occurred) noexcept
+{
+  motion_health.heartbeat(occurred);
+  FiberDriver::OnHeartbeat(occurred);
+}
+
+void ros2_canopen::LelyDriverBridge::OnCanState(io::CanState state, io::CanState previous) noexcept
+{
+  if (state != io::CanState::ACTIVE) motion_health.nmt(false);
+  FiberDriver::OnCanState(state, previous);
+}

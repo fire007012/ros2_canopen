@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "canopen_402_driver/mode.hpp"
+#include "rclcpp/rclcpp.hpp"
 
 namespace ros2_canopen
 {
@@ -39,15 +40,15 @@ class ModeTargetHelper : public Mode
   std::atomic<bool> has_target_;
 
 public:
-  ModeTargetHelper(uint16_t mode) : Mode(mode) {}
+  ModeTargetHelper(uint16_t mode) : Mode(mode), target_{}, has_target_(false) {}
   bool hasTarget() { return has_target_; }
   T getTarget() { return target_; }
   virtual bool setTarget(const double & val)
   {
-    if (std::isnan(val))
+    if (!std::isfinite(val))
     {
       // std::cout << "canopen_402 target command is not a number" << std::endl;
-      RCLCPP_DEBUG(rclcpp::get_logger("canopen_402_target"), "Target command is not a number");
+      RCLCPP_DEBUG(rclcpp::get_logger("canopen_402_target"), "Target command is not finite");
       return false;
     }
 

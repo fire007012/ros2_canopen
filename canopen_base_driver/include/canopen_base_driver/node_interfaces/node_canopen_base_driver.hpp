@@ -38,6 +38,7 @@ class NodeCanopenBaseDriver : public NodeCanopenDriver<NODETYPE>
     "NODETYPE must derive from rclcpp::Node or rclcpp_lifecycle::LifecycleNode");
 
 protected:
+  std::recursive_mutex poll_mutex_;
   std::thread nmt_state_publisher_thread_;
   std::thread rpdo_publisher_thread_;
   std::thread emcy_publisher_thread_;
@@ -79,6 +80,8 @@ public:
 
   virtual ~NodeCanopenBaseDriver()
   {
+    this->activated_.store(false);
+    if (poll_timer_) poll_timer_->cancel();
     if (nmt_state_publisher_thread_.joinable())
     {
       nmt_state_publisher_thread_.join();

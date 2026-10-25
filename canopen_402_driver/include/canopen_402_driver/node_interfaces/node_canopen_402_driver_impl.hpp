@@ -400,17 +400,25 @@ void NodeCanopen402Driver<NODETYPE>::activate(bool called_from_base)
 template <class NODETYPE>
 void NodeCanopen402Driver<NODETYPE>::deactivate(bool called_from_base)
 {
+  if (motor_) motor_->handleHalt();
   NodeCanopenProxyDriver<NODETYPE>::deactivate(false);
-  timer_->cancel();
+  if (timer_) timer_->cancel();
 }
 
 template <class NODETYPE>
 void NodeCanopen402Driver<NODETYPE>::poll_timer_callback()
 {
+  std::scoped_lock<std::recursive_mutex> lock(this->poll_mutex_);
+  if (!this->activated_.load()) return;
   NodeCanopenProxyDriver<NODETYPE>::poll_timer_callback();
-  motor_->handleRead();
-  motor_->handleWrite();
-  publish();
+  try {
+    motor_->handleRead();
+    motor_->handleWrite();
+    publish();
+  } catch (const std::exception & e) {
+    motor_->handleHalt();
+    RCLCPP_ERROR(this->node_->get_logger(), "CANopen poll failed: %s", e.what());
+  }
 }
 
 template <class NODETYPE>
@@ -428,8 +436,16 @@ template <class NODETYPE>
 void NodeCanopen402Driver<NODETYPE>::add_to_master()
 {
   NodeCanopenProxyDriver<NODETYPE>::add_to_master();
+  managed_by_ros2_control_ = this->config_["managed_by_ros2_control"] ?
+    this->config_["managed_by_ros2_control"].template as<bool>() : false;
+  this->lely_driver_->motion_health.configure(
+    this->config_["motion_safety"] ? this->config_["motion_safety"].template as<bool>() : false,
+    std::chrono::milliseconds(this->config_["feedback_timeout_ms"] ?
+      this->config_["feedback_timeout_ms"].template as<int>() : 100));
   motor_ =
-    std::make_shared<Motor402>(this->lely_driver_, switching_state_, homing_timeout_seconds_);
+    std::make_shared<Motor402>(this->lely_driver_, switching_state_, homing_timeout_seconds_,
+      this->config_["ip_target_mirror"] ? this->config_["ip_target_mirror"].template as<bool>() : false,
+      this->config_["perform_homing_on_init"] ? this->config_["perform_homing_on_init"].template as<bool>() : true);
 }
 
 template <class NODETYPE>
@@ -437,6 +453,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_init(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   if (this->activated_.load())
   {
     bool temp = motor_->handleInit();
@@ -448,6 +465,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_recover(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   if (this->activated_.load())
   {
     response->success = motor_->handleRecover();
@@ -468,6 +486,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_mode_position(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   response->success = set_operation_mode(MotorBase::Profiled_Position);
 }
 
@@ -476,6 +495,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_mode_velocity(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   response->success = set_operation_mode(MotorBase::Profiled_Velocity);
 }
 
@@ -484,6 +504,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_mode_cyclic_position(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   response->success = set_operation_mode(MotorBase::Cyclic_Synchronous_Position);
 }
 
@@ -492,6 +513,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_mode_interpolated_position(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   response->success = set_operation_mode(MotorBase::Interpolated_Position);
 }
 
@@ -500,6 +522,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_mode_cyclic_velocity(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   response->success = set_operation_mode(MotorBase::Cyclic_Synchronous_Velocity);
 }
 template <class NODETYPE>
@@ -507,6 +530,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_mode_torque(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   response->success = set_operation_mode(MotorBase::Profiled_Torque);
 }
 
@@ -515,6 +539,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_mode_cyclic_torque(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   response->success = set_operation_mode(MotorBase::Cyclic_Synchronous_Torque);
 }
 
@@ -523,6 +548,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_set_target(
   const canopen_interfaces::srv::COTargetDouble::Request::SharedPtr request,
   canopen_interfaces::srv::COTargetDouble::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   if (this->activated_.load())
   {
     auto mode = motor_->getMode();
@@ -565,6 +591,7 @@ void NodeCanopen402Driver<NODETYPE>::handle_enable(
   const std_srvs::srv::Trigger::Request::SharedPtr request,
   std_srvs::srv::Trigger::Response::SharedPtr response)
 {
+  if (managed_by_ros2_control_) { response->success = false; return; }
   if (this->activated_.load())
   {
     bool temp = motor_->handleEnable();
@@ -616,22 +643,11 @@ bool NodeCanopen402Driver<NODETYPE>::halt_motor()
 template <class NODETYPE>
 bool NodeCanopen402Driver<NODETYPE>::set_operation_mode(uint16_t mode)
 {
-  if (this->activated_.load())
-  {
-    if (motor_->getMode() != mode)
-    {
-      return motor_->enterModeAndWait(mode);
-    }
-    else
-    {
-      return false;
-    }
-  }
-  return false;
+  return this->activated_.load() && motor_->enterModeAndWait(mode);
 }
 
 template <class NODETYPE>
-bool NodeCanopen402Driver<NODETYPE>::set_target(double target)
+bool NodeCanopen402Driver<NODETYPE>::set_target(double target, uint64_t epoch)
 {
   if (this->activated_.load())
   {
@@ -654,7 +670,8 @@ bool NodeCanopen402Driver<NODETYPE>::set_target(double target)
       scaled_target = target;
     }
     // RCLCPP_INFO(this->node_->get_logger(), "Scaled target %f", scaled_target);
-    return motor_->setTarget(scaled_target);
+    return epoch == std::numeric_limits<uint64_t>::max() ?
+      motor_->setTarget(scaled_target) : motor_->setTarget(scaled_target, epoch);
   }
   else
   {

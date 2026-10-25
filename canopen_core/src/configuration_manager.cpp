@@ -14,6 +14,7 @@
 
 #include "canopen_core/configuration_manager.hpp"
 #include <stdexcept>
+#include <filesystem>
 
 namespace ros2_canopen
 {
@@ -32,6 +33,8 @@ void ConfigurationManager::init_config()
     }
   }
 
+  const auto bus_directory = std::filesystem::absolute(std::filesystem::path(file_)).parent_path().string();
+  if (dcf_path == "." || dcf_path == "@BUS_CONFIG_PATH@") dcf_path = bus_directory;
   for (YAML::const_iterator it = root_.begin(); it != root_.end(); it++)
   {
     std::string driver_name = it->first.as<std::string>();
@@ -41,6 +44,9 @@ void ConfigurationManager::init_config()
     {
       config_node["dcf_path"] = dcf_path;
     }
+    if (config_node["dcf_path"].as<std::string>() == "." ||
+        config_node["dcf_path"].as<std::string>() == "@BUS_CONFIG_PATH@")
+      config_node["dcf_path"] = bus_directory;
     devices_.insert({driver_name, config_node});
   }
 }
