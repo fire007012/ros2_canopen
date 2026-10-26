@@ -326,7 +326,10 @@ void NodeCanopenBaseDriver<NODETYPE>::add_to_master()
     }
     if (!boot_success)
     {
-      throw DriverException(
+      // Release the failed bridge on the Lely executor before exposing an axis-local
+      // error. If cleanup itself fails, the shared resource cannot be assumed usable.
+      this->remove_from_master();
+      throw AxisBootException(
         std::string("Boot failed after ") + std::to_string(boot_attempts) + " attempts");
     }
   }

@@ -35,9 +35,15 @@ private:
 public:
   DriverException(std::string what) { what_ = what; }
 
-  char * what();
+  const char * what() const noexcept override;
 };
 
+// Only a completed, cleaned-up per-device boot failure may be isolated.
+// Configuration errors and failures of the shared master retain their original propagation.
+class AxisBootException : public DriverException {
+public:
+  using DriverException::DriverException;
+};
 }  // namespace ros2_canopen
 
 #endif

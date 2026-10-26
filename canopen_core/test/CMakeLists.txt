@@ -136,3 +136,8 @@ target_link_libraries(test_errors
   node_canopen_master
   node_canopen_driver
 )
+
+ament_add_gmock(test_node_isolation test_node_isolation.cpp)
+ament_target_dependencies(test_node_isolation ${dependencies})
+target_include_directories(test_node_isolation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(test_node_isolation device_container node_canopen_master node_canopen_driver)

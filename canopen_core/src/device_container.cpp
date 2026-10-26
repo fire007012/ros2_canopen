@@ -14,6 +14,7 @@
 //    limitations under the License.
 
 #include "canopen_core/device_container.hpp"
+#include "canopen_core/driver_error.hpp"
 #include "canopen_core/device_container_error.hpp"
 
 using namespace ros2_canopen;
@@ -23,6 +24,15 @@ void DeviceContainer::set_executor(const std::weak_ptr<rclcpp::Executor> executo
   executor_ = executor;
 }
 
+bool DeviceContainer::retry_driver(uint16_t node_id) {
+  std::lock_guard<std::mutex> lock(retry_mutex_);
+  auto failed = failed_drivers_.find(node_id);
+  if (failed == failed_drivers_.end()) return true;
+  try {
+    registered_drivers_.at(node_id)->get_node_canopen_driver_interface()->activate();
+    failed_drivers_.erase(failed); return true;
+  } catch (const AxisBootException & e) { failed->second = e.what(); return false; }
+}
 bool DeviceContainer::init_driver(uint16_t node_id)
 {
   RCLCPP_DEBUG(this->get_logger(), "init_driver");
@@ -332,7 +342,21 @@ bool DeviceContainer::load_drivers()
         return false;
       }
       add_node_to_executor(registered_drivers_[node_id.value()]->get_node_base_interface());
-      registered_drivers_[node_id.value()]->init();
+      if (lazy_drivers_ && !lifecycle_operation_) {
+        const auto interface = registered_drivers_[node_id.value()]->get_node_canopen_driver_interface();
+        interface->init(); interface->configure();
+        init_driver(node_id.value());  // Same unique master, without a recursive ROS service call.
+        failed_drivers_[node_id.value()] = "communication not initialized";
+        continue;
+      }
+      try { registered_drivers_[node_id.value()]->init(); }
+      catch (const AxisBootException & error) {
+        if (!partial_drivers_ || lifecycle_operation_) throw;
+        failed_drivers_[node_id.value()] = error.what();
+        RCLCPP_ERROR(this->get_logger(), "Axis %u unavailable: %s; continuing other drivers",
+          node_id.value(), error.what());
+        // Retain the driver/node for diagnostics and explicit retry through init_driver.
+      }
     }
   }
   return true;

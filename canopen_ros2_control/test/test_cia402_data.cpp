@@ -164,3 +164,20 @@ TEST(DeclaredInterfaces, SingleAxisExportsOnlyItsUrdfContract)
   std::vector<hardware_interface::CommandInterface> interfaces;data.export_command_interface(interfaces);
   ASSERT_EQ(interfaces.size(),1u);EXPECT_EQ(interfaces[0].get_name(),"axis/velocity");
 }
+TEST_F(RobotCommandSession, StopOnlyFailureReleasesLocalResourcesAndRecordsUnconfirmedStop) {
+  ASSERT_TRUE(start("joint/position")); motor.halt_ok = false;
+  data.interfaces_to_stop = {"joint/position"};
+  EXPECT_TRUE(data.perform_switch(motor)); EXPECT_TRUE(data.stop_failed);
+  EXPECT_TRUE(data.interfaces_to_running.empty()); EXPECT_TRUE(std::isnan(data.target_position));
+}
+TEST_F(RobotCommandSession, MissingDriverDoesNotBlockStopOnlyResourceRelease) {
+  data.interfaces_to_running = {"joint/position"}; data.interfaces_to_stop = {"joint/position"};
+  EXPECT_TRUE(data.perform_switch()); EXPECT_TRUE(data.stop_failed); EXPECT_TRUE(data.interfaces_to_running.empty());
+  data.interfaces_to_start = {"joint/position"}; EXPECT_FALSE(data.perform_switch());
+}
+TEST_F(RobotCommandSession, GroupPreflightDoesNotEmitTargetsAndDetectsInvalidOutput) {
+  ASSERT_TRUE(start("joint/position"));data.lower=-.1;data.upper=.1;data.target_position=.05;
+  EXPECT_TRUE(data.validate_target(motor));EXPECT_EQ(motor.writes,0);
+  data.target_position=INFINITY;EXPECT_FALSE(data.validate_target(motor));EXPECT_EQ(motor.writes,0);
+  data.target_position=.2;EXPECT_FALSE(data.validate_target(motor));EXPECT_EQ(motor.writes,0);
+}

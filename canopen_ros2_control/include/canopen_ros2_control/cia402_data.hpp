@@ -18,6 +18,8 @@
 #define CANOPEN_ROS2_CONTROL__CIA402_DATA_HPP_
 #include <yaml-cpp/yaml.h>
 #include <cstdint>
+#include <array>
+#include "robot_safety/axis_session.hpp"
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -35,6 +37,9 @@ namespace canopen_ros2_control
 struct Cia402Data
 {
   uint8_t node_id;
+  robot_safety::AxisSession session;
+  std::map<uint16_t,std::array<int64_t,3>> feedback_timings;
+  bool stop_failed = false;
   std::string joint_name;
   std::shared_ptr<ros2_canopen::Cia402Driver> driver;
   std::map<std::string, ros2_canopen::MotorBase::OperationMode> command_interface_to_operation_mode;
@@ -164,6 +169,26 @@ struct Cia402Data
     actual_velocity = driver->get_speed();
   }
 
+  bool validate_target() const { return interfaces_to_running.empty() || (driver && validate_target(*driver)); }
+  template <class Driver>
+  bool validate_target(Driver & motor) const {
+    if (interfaces_to_running.empty()) return true;
+    if (interfaces_to_running.size() != 1) return false;
+    const auto active = command_interface_to_operation_mode.find(interfaces_to_running.front());
+    if (active == command_interface_to_operation_mode.end() || !motor.command_ready() ||
+        motor.command_epoch() != command_epoch || motor.get_mode() != active->second) return false;
+    const auto mode = motor.get_mode();
+    const bool velocity = mode == MotorBase::Profiled_Velocity || mode == MotorBase::Cyclic_Synchronous_Velocity;
+    const bool torque = mode == MotorBase::Profiled_Torque || mode == MotorBase::Cyclic_Synchronous_Torque;
+    const double command = velocity ? target_velocity : torque ? target_torque : target_position;
+    if (!std::isfinite(command)) return std::isnan(command) && !command_received;
+    if (velocity) return std::abs(command) <= velocity_limit &&
+      !(actual_position <= lower && command < 0) && !(actual_position >= upper && command > 0);
+    if (torque || mode == MotorBase::No_Mode) return true;
+    return (mode == MotorBase::Profiled_Position || mode == MotorBase::Cyclic_Synchronous_Position ||
+      mode == MotorBase::Interpolated_Position) && command >= lower && command <= upper;
+  }
+
   bool write_target()
   {
     return driver && write_target(*driver);
@@ -226,7 +251,14 @@ struct Cia402Data
 
   bool perform_switch()
   {
-    return driver && perform_switch(*driver);
+    if (driver) return perform_switch(*driver);
+    if (!interfaces_to_start.empty()) return false;
+    // An offline drive cannot hold local controller resources hostage.
+    if (!interfaces_to_stop.empty()) {
+      interfaces_to_running.clear(); clear_commands(); stop_failed = true;
+    }
+    interfaces_to_stop.clear();
+    return true;
   }
 
   template <class Driver>
@@ -250,7 +282,10 @@ struct Cia402Data
     // Revoke the old command session before any device operation, including failures.
     interfaces_to_running.clear();
     clear_commands();
-    if (stopping && !motor.halt_motor()) return false;
+    if (stopping) {
+      stop_failed = !motor.halt_motor();
+      if (stop_failed && !start.empty()) return false;
+    }
     if (start.empty()) return true;
     const auto mode = command_interface_to_operation_mode.at(start.front());
     if (!motor.set_operation_mode(mode) || !motor.command_ready() || motor.get_mode() != mode)

@@ -63,6 +63,10 @@ install(
 )
 
 if(BUILD_TESTING)
+  ament_add_gmock(test_grouped_robot_system test/test_grouped_robot_system.cpp)
+  target_include_directories(test_grouped_robot_system PRIVATE include)
+  target_link_libraries(test_grouped_robot_system canopen_ros2_control)
+  ament_target_dependencies(test_grouped_robot_system ${THIS_PACKAGE_INCLUDE_DEPENDS})
   ament_add_gmock(test_cia402_data test/test_cia402_data.cpp)
   target_include_directories(test_cia402_data PRIVATE include)
   ament_target_dependencies(test_cia402_data ${THIS_PACKAGE_INCLUDE_DEPENDS})

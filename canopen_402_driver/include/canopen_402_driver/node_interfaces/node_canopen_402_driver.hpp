@@ -85,7 +85,16 @@ public:
     return motor_->get_position() * scale_pos_from_dev_ + offset_pos_from_dev_;
   }
 
-  bool communication_ready() { return this->activated_.load() && this->lely_driver_->motion_health.snapshot().ready; }
+  ros2_canopen::MotionHealth::Snapshot communication_status() {
+    if (!this->activated_.load()) return {false,0,"driver inactive"};
+    return this->lely_driver_->motion_health.snapshot();
+  }
+  bool communication_ready() { return communication_status().ready; }
+  void feedback_timing(uint16_t index, int64_t warn, int64_t stop, int64_t stable) {
+    if (!this->activated_.load()) throw std::runtime_error("driver inactive");
+    this->lely_driver_->motion_health.timing(index,std::chrono::milliseconds(warn),
+      std::chrono::milliseconds(stop),std::chrono::milliseconds(stable));
+  }
   bool command_ready() { return this->activated_.load() && motor_ && motor_->commandReady(); }
   uint64_t command_epoch() { return motor_->commandEpoch(); }
   virtual uint16_t get_mode() { return motor_->getMode(); }

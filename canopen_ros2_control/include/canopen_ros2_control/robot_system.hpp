@@ -29,6 +29,7 @@
 #include "rclcpp/macros.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "robot_safety/domain.hpp"
+#include "robot_safety/runtime.hpp"
 #include "std_srvs/srv/trigger.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 namespace canopen_ros2_control
@@ -168,7 +169,14 @@ public:
 protected:
   std::shared_ptr<robot_safety::Domain> safety_;
   uint64_t safety_epoch_ = 0;
-  bool configured_ok_ = false, hardware_active_ = false;
+  bool grouped_ = false;
+  std::shared_ptr<robot_safety::Runtime> guard_, backend_services_;
+  void startBackendServices();
+  void initializeGroup(const std::string & group);
+  void prepareGroup(const std::string & group);
+  void stopGroup(const std::string & group);
+  bool configured_ok_ = false;
+  std::atomic<bool> hardware_active_{false};
   std::string configure_error_;
   std::shared_ptr<rclcpp::Node> runtime_node_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr arm_service_, status_service_;

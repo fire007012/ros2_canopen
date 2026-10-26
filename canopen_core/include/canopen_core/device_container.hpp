@@ -43,6 +43,10 @@ namespace ros2_canopen
  */
 class DeviceContainer : public rclcpp_components::ComponentManager
 {
+  std::mutex retry_mutex_;
+  bool partial_drivers_ = false, lazy_drivers_ = false;
+  std::map<uint16_t, std::string> failed_drivers_;
+
 public:
   /**
    * @brief Construct a new Lifecycle Device Container Node object
@@ -86,6 +90,10 @@ public:
    * @return false
    */
   void init();
+  bool retry_driver(uint16_t node_id);
+  void lazy_driver_activation(bool value) { lazy_drivers_ = value; }
+  void allow_partial_drivers(bool value) { partial_drivers_ = value; }
+  const std::map<uint16_t, std::string> & failed_drivers() const { return failed_drivers_; }
 
   /**
    * @brief Executes the initialisation

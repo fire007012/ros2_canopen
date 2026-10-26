@@ -112,3 +112,25 @@ TEST(CommunicationFaults, RecoveryNeverRevalidatesOldTransportEpoch)
   now += std::chrono::milliseconds(101);
   EXPECT_FALSE(health.snapshot(now).ready);
 }
+TEST(CommunicationFaults, GroupTimingHasWarningStopBoundaryAndStableRecovery) {
+  using H=ros2_canopen::MotionHealth;H health;health.configure(true,std::chrono::milliseconds(100));
+  for(auto i:{0x6041,0x6061,0x6064,0x606C})health.timing(i,std::chrono::milliseconds(50),std::chrono::milliseconds(100),std::chrono::milliseconds(30));
+  auto now=H::Clock::time_point(std::chrono::seconds(1));health.nmt(true);
+  auto feed=[&]{for(auto i:{0x6041,0x6061,0x6064,0x606C})health.feedback(i,now);};
+  feed();EXPECT_FALSE(health.snapshot(now).ready);
+  now+=std::chrono::milliseconds(30);feed();ASSERT_TRUE(health.snapshot(now).ready);
+  auto epoch=health.snapshot(now).epoch;now+=std::chrono::milliseconds(50);
+  EXPECT_TRUE(health.snapshot(now).ready);EXPECT_TRUE(health.snapshot(now).warning);
+  now+=std::chrono::milliseconds(50);EXPECT_FALSE(health.snapshot(now).ready);EXPECT_GT(health.snapshot(now).epoch,epoch);
+  feed();EXPECT_FALSE(health.snapshot(now).ready);now+=std::chrono::milliseconds(30);feed();EXPECT_TRUE(health.snapshot(now).ready);
+  health.emergency(0x2310);EXPECT_EQ(health.snapshot(now).emcy,0x2310);EXPECT_FALSE(health.snapshot(now).ready);
+}
+TEST(CommunicationFaults, FeedbackTypesHaveIndependentTrustedDeadlines) {
+  using H=ros2_canopen::MotionHealth;H health;health.configure(true,std::chrono::milliseconds(100));health.nmt(true);
+  health.timing(0x6064,std::chrono::milliseconds(20),std::chrono::milliseconds(40),std::chrono::milliseconds(0));
+  auto now=H::Clock::time_point(std::chrono::seconds(1));
+  for(auto i:{0x6041,0x6061,0x6064,0x606C})health.feedback(i,now);
+  ASSERT_TRUE(health.snapshot(now).ready);now+=std::chrono::milliseconds(40);
+  EXPECT_FALSE(health.snapshot(now).ready);
+  EXPECT_THROW(health.timing(0x6064,std::chrono::milliseconds(50),std::chrono::milliseconds(40),std::chrono::milliseconds(0)),std::invalid_argument);
+}

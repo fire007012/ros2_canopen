@@ -69,26 +69,30 @@ public:
     node_canopen_402_driver_->register_rpdo_cb(rpdo_cb);
   }
 
-  double get_speed() { return node_canopen_402_driver_->get_speed(); }
+  virtual double get_speed() { return node_canopen_402_driver_->get_speed(); }
 
-  double get_position() { return node_canopen_402_driver_->get_position(); }
+  virtual double get_position() { return node_canopen_402_driver_->get_position(); }
 
-  bool communication_ready() { return node_canopen_402_driver_->communication_ready(); }
-  bool command_ready() { return node_canopen_402_driver_->command_ready(); }
-  uint64_t command_epoch() { return node_canopen_402_driver_->command_epoch(); }
-  bool set_target(double target) { return node_canopen_402_driver_->set_target(target); }
-  bool set_target(double target, uint64_t epoch)
+  virtual ros2_canopen::MotionHealth::Snapshot communication_status() { return node_canopen_402_driver_->communication_status(); }
+  virtual void feedback_timing(uint16_t index,int64_t warn,int64_t stop,int64_t stable) {
+    node_canopen_402_driver_->feedback_timing(index,warn,stop,stable);
+  }
+  virtual bool communication_ready() { return node_canopen_402_driver_->communication_ready(); }
+  virtual bool command_ready() { return node_canopen_402_driver_->command_ready(); }
+  virtual uint64_t command_epoch() { return node_canopen_402_driver_->command_epoch(); }
+  virtual bool set_target(double target) { return node_canopen_402_driver_->set_target(target); }
+  virtual bool set_target(double target, uint64_t epoch)
   { return node_canopen_402_driver_->set_target(target, epoch); }
 
-  bool init_motor() { return node_canopen_402_driver_->init_motor(); }
+  virtual bool init_motor() { return node_canopen_402_driver_->init_motor(); }
 
-  bool recover_motor() { return node_canopen_402_driver_->recover_motor(); }
+  virtual bool recover_motor() { return node_canopen_402_driver_->recover_motor(); }
 
-  bool halt_motor() { return node_canopen_402_driver_->halt_motor(); }
+  virtual bool halt_motor() { return node_canopen_402_driver_->halt_motor(); }
 
-  uint16_t get_mode() { return node_canopen_402_driver_->get_mode(); }
+  virtual uint16_t get_mode() { return node_canopen_402_driver_->get_mode(); }
 
-  bool set_operation_mode(uint16_t mode)
+  virtual bool set_operation_mode(uint16_t mode)
   {
     return node_canopen_402_driver_->set_operation_mode(mode);
   }
